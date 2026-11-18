@@ -1,10 +1,18 @@
 # Let's Encrypt on an Asustor NAS using the AWS Route 53 DNS challenge
 
-This sets up an Asustor NAS (written for an AS6706T running ADM 4.x/5.x) to use a Let's Encrypt certificate
+This sets up an Asustor NAS to use a Let's Encrypt certificate for the ADM web interface. The certificate is
 issued through the **DNS-01 challenge via AWS Route 53**. The NAS does **not** need to be reachable from
 the internet; certbot proves you own the domain by creating a temporary `_acme-challenge` TXT record in Route 53.
 
-Adapted from the Cloudflare version (`ASUStor NAS LetsEncrypt DNS for Cloudflare.txt`). Main differences:
+**Tested on:** Asustor AS6706T with ADM 5.1.4. Other models running ADM 5 use the same file layout and should work.
+Earlier ADM versions are untested.
+
+> **Use at your own risk.** This changes system files on the NAS that ADM doesn't officially expect you to touch.
+> The deploy hook backs up ADM's original certificate first, and the *Reverting* section below undoes everything.
+
+Adapted from community guides that do the same with Cloudflare
+([bergelfs](https://gist.github.com/bergelfs/ae1bae681d10ce37ec5645d362fcf9ef),
+[troyfontaine](https://gist.github.com/troyfontaine/9febcc69f632330b3d462a2e14c57aa1)). Main differences:
 
 | | Cloudflare version | This version |
 |---|---|---|
@@ -47,9 +55,14 @@ Adapted from the Cloudflare version (`ASUStor NAS LetsEncrypt DNS for Cloudflare
    Route 53 → *Hosted zones* → click your domain → copy the **Hosted zone ID** (looks like `Z0123456789ABCDEFGHIJ`).
 
 2. **Create the IAM policy.**
-   IAM → *Policies* → *Create policy* → **JSON** tab → paste the contents of `route53-iam-policy.json`,
-   replacing `YOUR_HOSTED_ZONE_ID` with the ID from step 1.
-   Name it e.g. `certbot-route53-mydomain`.
+   IAM → *Policies* → *Create policy* → **JSON** tab → paste the contents of `route53-iam-policy.json`, then replace:
+   - `YOUR_HOSTED_ZONE_ID` with the ID from step 1;
+   - `_acme-challenge.nas.mydomain.com` with `_acme-challenge.` followed by your NAS hostname, all **lowercase**,
+     no trailing dot. For a wildcard certificate (`*.mydomain.com`), also add `_acme-challenge.mydomain.com` to that list.
+
+   This lets the key create and delete **only** the TXT records used for the challenge. Even if the key leaked,
+   it couldn't change any other record in your domain.
+   Name the policy e.g. `certbot-route53-mydomain`.
 
 3. **Create an IAM user for the NAS.**
    IAM → *Users* → *Create user* → name `certbot-nas` (no console access) →
@@ -66,7 +79,8 @@ Adapted from the Cloudflare version (`ASUStor NAS LetsEncrypt DNS for Cloudflare
 
 ### Step 1 – Copy the files to the NAS
 
-The easiest route is to copy this folder to a NAS shared folder from Windows (e.g. `\\NAS\Public\asustor-dns-challenge`).
+The easiest route is to copy this folder to any NAS shared folder over the network. The commands below use
+`Public` as the example (`\\NAS\Public\asustor-dns-challenge` from Windows); adjust the path if you use another share.
 Then SSH in as an admin user and become root:
 
 ```shell
@@ -139,9 +153,15 @@ Look for **"The dry run was successful."** If it fails, see *Troubleshooting* be
 
 Certbot saves the DNS plugin and the deploy hook in its renewal config. Renewals therefore need no extra arguments.
 The deploy hook runs right after this first issue. It backs up ADM's current certificate files once
-(to `/usr/builtin/etc/certificate/ssl_before_letsencrypt/`), writes the new `ssl.key`, `ssl.crt` and `ssl.pem`,
-sets `"default": false` in `certificate.json` so ADM uses them, and restarts ADM's web server.
-Your browser session may drop briefly.
+(to `/usr/builtin/etc/certificate/ssl_before_letsencrypt/`), writes the new `ssl.key`, `ssl.crt`, `ssl.pem`
+and `ssl.chain` (the Let's Encrypt intermediate), and restarts ADM's web server.
+Your browser session may drop briefly; reopen the browser or use a private window to see the new certificate.
+
+> How ADM 5 serves its certificate: lighttpd reads `/usr/etc/lighttpd/lighttpd.pem` (a link to
+> `/usr/builtin/etc/certificate/ssl.pem`) and the intermediate from `/usr/etc/lighttpd/lighttpd.chain` (a link to
+> `/usr/builtin/etc/certificate/ssl.chain`). The stock Asustor certificate has no intermediate, so `ssl.chain`
+> doesn't exist until the hook creates it. If it's missing, browsers show "Not secure" even with a valid certificate.
+> `certificate.json` is only Certificate Manager's list and isn't changed.
 
 To rerun the hook by hand at any time (for example after changing it):
 
@@ -181,10 +201,24 @@ Browse to `https://nas.mydomain.com:8001` (or whatever HTTPS port ADM uses). The
   That's expected.
 - Logs: `/volume1/system/letsencrypt/logs/letsencrypt.log`.
 
+## Security notes
+
+- **The AWS key is the only secret.** It lives in `aws-credentials` in a root-only folder (`chmod 700`, file `chmod 600`).
+  With the IAM policy above it can only add or remove `_acme-challenge` TXT records for your hostname.
+  If you think it has leaked, delete the access key in IAM and create a new one.
+- **Never commit `aws-credentials`** or the `etc/` folder (which holds your certificate's private key). The included
+  `.gitignore` excludes them if you keep a working copy of this repo.
+- **Delete the copy in your shared folder** once installed, especially if you put real keys in `aws-credentials.example` there.
+- **ADM stores the web server key world-readable** (`ssl.key` is mode 755 by default). This is ADM's own default and is
+  left unchanged here, because other ADM services may need to read it.
+- **The NAS isn't exposed.** DNS-01 needs no inbound ports; only the NAS's outgoing HTTPS calls to Let's Encrypt
+  and AWS are used. Your hostname does appear in public Certificate Transparency logs, like every publicly trusted certificate.
+
 ## Reverting to ADM's original certificate
 
 ```shell
 cp -p /usr/builtin/etc/certificate/ssl_before_letsencrypt/* /usr/builtin/etc/certificate/
+rm -f /usr/builtin/etc/certificate/ssl.chain
 for s in /etc/init.d/S*lighttpd; do "$s" restart; done
 crontab -l | grep -v 'letsencrypt/certbot.sh' | crontab -
 ```
@@ -196,9 +230,11 @@ crontab -l | grep -v 'letsencrypt/certbot.sh' | crontab -
 | `/bin/sh^M: bad interpreter` or `not found` | Windows line endings. Run the `sed -i 's/\r$//' ...` line from step 1. |
 | `Python 3 not found` | Install **Python3** from App Central, then rerun `install.sh`. |
 | `Unable to locate credentials` / `NoCredentialsError` | `aws-credentials` is missing, has CRLF endings, or lacks the `[default]` header. Always run certbot via `certbot.sh`, which sets the path to the credentials file. |
-| `AccessDenied` on `ChangeResourceRecordSets` | Wrong hosted zone ID in the IAM policy, or the domain is in a different zone. |
+| `AccessDenied` on `ChangeResourceRecordSets` | Wrong hosted zone ID in the IAM policy, or the `_acme-challenge.` name in the policy doesn't exactly match your hostname (it must be lowercase, with no trailing dot). |
 | `Unable to find a Route53 hosted zone for ...` | The domain isn't in this AWS account, or `ListHostedZones` is missing from the policy. |
 | Challenge fails with "incorrect TXT record" | Usually DNS propagation. Add `--dns-route53-propagation-seconds 60` to the certonly command. |
 | pip fails building `cryptography` | Python3 from App Central is too old for prebuilt wheels. Update the Python3 app, delete `/volume1/system/letsencrypt/venv`, and rerun `install.sh`. |
-| Browser still shows the Asustor certificate | Check `grep default /usr/builtin/etc/certificate/certificate.json` says `false`, and that `openssl x509 -in /usr/builtin/etc/certificate/ssl.crt -noout -subject -issuer` shows your hostname and Let's Encrypt. Then restart lighttpd and hard-refresh the browser. |
-| `ADM certificate folder ... not found` from the deploy hook | Very old ADM (3.x) keeps it at `/volume0/usr/etc/lighttpd/lighttpd.pem` instead. |
+| Browser still shows the Asustor certificate | Check `ls -la /usr/etc/lighttpd/lighttpd.pem` points to `/usr/builtin/etc/certificate/ssl.pem`, then restart lighttpd and fully close/reopen the browser (it reuses old connections). |
+| Browser shows your certificate but "Not secure" / incomplete chain | `/usr/builtin/etc/certificate/ssl.chain` is missing or empty. Rerun the deploy hook by hand (step 5). |
+| Restarting lighttpd prints an nftables `Range has zero or negative size` error | A typo in an ADM Defender trusted IP range (start address higher than end). Fix it under Settings → ADM Defender. It's unrelated to the certificate. |
+| `ADM certificate folder ... not found` from the deploy hook | Your ADM version keeps the certificate elsewhere. Run `ls -la /usr/etc/lighttpd/` to see where `lighttpd.pem` and `lighttpd.chain` point, and change `CERTDIR` in `adm-deploy.sh` to match. |

@@ -1,0 +1,7 @@
+# Never commit real credentials or certbot state (contains private keys)
+aws-credentials
+!aws-credentials.example
+etc/
+work/
+logs/
+venv/
