@@ -9,6 +9,9 @@ Earlier ADM versions are untested.
 
 > **Use at your own risk.** This changes system files on the NAS that ADM doesn't officially expect you to touch.
 > The deploy hook backs up ADM's original certificate first, and the *Reverting* section below undoes everything.
+> Back up anything important on the NAS before starting.
+>
+> This is an unofficial community project, not affiliated with or endorsed by ASUSTOR Inc. or Amazon Web Services.
 
 Adapted from community guides that do the same with Cloudflare
 ([bergelfs](https://gist.github.com/bergelfs/ae1bae681d10ce37ec5645d362fcf9ef),
