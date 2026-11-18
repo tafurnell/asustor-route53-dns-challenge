@@ -1,0 +1,3 @@
+# Keep Unix line endings on files that run on the NAS, even when checked out on Windows.
+*.sh                    text eol=lf
+aws-credentials*        text eol=lf
